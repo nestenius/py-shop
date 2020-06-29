@@ -1,0 +1,144 @@
+AWSTemplateFormatVersion: 2010-09-09
+
+Description:
+  CloudFormation custom template for deployment of AWS full stack for PyShop Project. Resources include EC2 instances, Security Groups
+
+Parameters:
+
+  AvailabilityZones:
+    Type: CommaDelimitedList
+    Default: ap-east-1a
+
+  AWSRegion:
+    Type: String
+    Default: ap-east-1
+
+  InstanceType:
+    Type: String
+    Default: t3.micro
+
+  MyKeyName:
+    Type: String
+    Default: pyshop
+
+
+Resources:
+    PyShopInstance:
+      Type: AWS::EC2::Instance
+      Properties:
+          AvailabilityZone: ap-east-1a
+          ImageId: ami-c42464b5  #ubuntu server 16.04 LTS, free tier eligible in us-east-1a
+          InstanceType: !Ref InstanceType #References instancetype parameter
+          KeyName: !Ref MyKeyName  #References keypair parameter
+          SecurityGroups:
+            - !Ref PyShopSecurityGroup
+          UserData: !Base64 |
+            #!/bin/bash
+            sudo apt-get update -qq
+            sudo apt-get install -y apt-transport-https ca-certificates
+            sudo apt-key adv --keyserver hkp://p80.pool.sks-keyservers.net:80 --recv-keys 58118E89F3A912897C070ADBF76221572C52609D
+            sudo echo "deb https://apt.dockerproject.org/repo ubuntu-xenial main" | tee /etc/apt/sources.list.d/docker.list
+            sudo apt-get update -qq
+            sudo apt-get purge lxc-docker || true
+            sudo apt-get -y install linux-image-extra-$(uname -r) linux-image-extra-virtual
+            sudo apt-get -y install docker-engine
+            sudo usermod -aG docker ubuntu
+            sudo mkdir -p /etc/systemd/system/docker.service.d
+            sudo printf "[Service]\nExecStart=\nExecStart=/usr/bin/dockerd -H fd:// -H tcp://0.0.0.0:2375\n" >>  /etc/systemd/system/docker.service.d/docker.conf
+            sudo systemctl daemon-reload
+            sudo systemctl restart docker
+    PyShopSecurityGroup:
+      Type: AWS::EC2::SecurityGroup
+      Properties:
+          GroupDescription: Enable http access via port 80, 22, 2375
+          SecurityGroupIngress:
+          - IpProtocol: tcp
+            FromPort: '80'
+            ToPort: '80'
+            CidrIp: 0.0.0.0/0
+          - IpProtocol: tcp
+            FromPort: '22'
+            ToPort: '22'
+            CidrIp: 0.0.0.0/0
+          - IpProtocol: tcp
+            FromPort: '2375'
+            ToPort: '2375'
+            CidrIp: 0.0.0.0/0
+
+#Create ElasticIP
+    MyElasticIP:
+      Type: AWS::EC2::EIP
+      Properties:
+        InstanceId: !Ref PyShopInstance
+
+#Launch Config for AutoScaling setup
+    MyLaunchConfig:
+      Type: AWS::AutoScaling::LaunchConfiguration
+      Properties:
+        ImageId: ami-c42464b5  #same ubuntu ami as EC2
+        KeyName: !Ref MyKeyName
+        SecurityGroups:
+          - !Ref PyShopSecurityGroup
+        InstanceType: !Ref InstanceType
+        UserData: !Base64 |
+          #!/bin/bash
+          sudo apt-get update -qq
+          sudo apt-get install -y apt-transport-https ca-certificates
+          sudo apt-key adv --keyserver hkp://p80.pool.sks-keyservers.net:80 --recv-keys 58118E89F3A912897C070ADBF76221572C52609D
+          sudo echo "deb https://apt.dockerproject.org/repo ubuntu-xenial main" | tee /etc/apt/sources.list.d/docker.list
+          sudo apt-get update -qq
+          sudo apt-get purge lxc-docker || true
+          sudo apt-get -y install linux-image-extra-$(uname -r) linux-image-extra-virtual
+          sudo apt-get -y install docker-engine
+          sudo usermod -aG docker ubuntu
+          sudo mkdir -p /etc/systemd/system/docker.service.d
+          sudo printf "[Service]\nExecStart=\nExecStart=/usr/bin/dockerd -H fd:// -H tcp://0.0.0.0:2375\n" >>  /etc/systemd/system/docker.service.d/docker.conf
+          sudo systemctl daemon-reload
+          sudo systemctl restart docker
+#Create S3 bucket with bucket policy
+    S3Bucket:
+      Type: AWS::S3::Bucket
+      Properties:
+        BucketName: pyshop-static
+
+    BucketPolicy:
+      Type: AWS::S3::BucketPolicy
+      Properties:
+        Bucket: !Ref S3Bucket
+        PolicyDocument:
+          Statement:
+            - Action: 's3:GetObject'
+              Effect: Allow
+              Resource: !Sub 'arn:aws:s3:::${S3Bucket}/*'
+              Principal: '*'
+
+#In deploy command add the parameter --capabilities CAPABILITY_IAM to explicitly define the creation of IAM related resources.
+    S3User:
+      Type: AWS::IAM::User
+      Properties:
+        Policies:
+          - PolicyName: !Sub 'publish-to-${S3Bucket}'
+            PolicyDocument:
+              Statement:
+              - Action: 's3:*'
+                Effect: Allow
+                Resource:
+                - !Sub 'arn:aws:s3:::${S3Bucket}'
+                - !Sub 'arn:aws:s3:::${S3Bucket}/*'
+
+    PublishCredentials:
+      Type: AWS::IAM::AccessKey
+      Properties:
+        UserName: !Ref S3User
+
+#Outputs for S3 access key and secret access, retrieve after stack formed
+Outputs:
+    BucketName:
+      Description: 'S3 Bucket Name'
+      Value: !Ref S3Bucket
+    AccessKeyId:
+      Description: 'S3 Access Key'
+      Value: !Ref PublishCredentials
+    AccessKeySecret:
+      Description: 'S3 Secret Key'
+      Value: !GetAtt PublishCredentials.SecretAccessKey
